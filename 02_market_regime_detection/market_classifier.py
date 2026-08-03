@@ -9,12 +9,17 @@ import pandas as pd
 from typing import Dict, Tuple
 
 # Internal module imports (assuming relative execution context for the pipeline)
-from .detector import RegimeDetector
+from detector import RegimeDetector
 import sys
+import importlib
 from pathlib import Path
+
+# Append project root to path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from base_utils import returns as ret_utils  # Conceptual import based on structure
-from base_utils import normalization as norm_utils
+
+# Dynamically import modules from directories starting with numbers
+ret_utils = importlib.import_module("01_data_preprocessing.returns")
+norm_utils = importlib.import_module("01_data_preprocessing.normalization")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
