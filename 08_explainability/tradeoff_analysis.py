@@ -87,3 +87,4 @@ class TradeoffAnalyzer:
         
         logger.info("Tradeoff analysis complete.")
         return report
+    

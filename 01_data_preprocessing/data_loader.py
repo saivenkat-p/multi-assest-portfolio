@@ -70,31 +70,71 @@ class DataLoader:
         Loads and cleans historical asset price data.
 
         Args:
-            filename (str): Name of the historical prices CSV.
+        filename (str): Name of the historical prices CSV.
 
         Returns:
-            pd.DataFrame: Cleaned price data with DatetimeIndex and no NaNs.
+        pd.DataFrame: Cleaned price data with DatetimeIndex and no NaNs.
         """
         logger.info(f"Loading historical prices from {filename}")
         df = self._load_csv(filename, index_col=None)
-        
+
         # Ensure a date column exists
-        date_cols = [col for col in df.columns if 'date' in col.lower()]
+        date_cols = [col for col in df.columns if "date" in col.lower()]
         if not date_cols:
             raise ValueError("No recognizable date column found in price data.")
-        
+
         date_col = date_cols[0]
-        df[date_col] = pd.to_datetime(df[date_col])
+
+    # Convert dates (invalid dates become NaT)
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+        invalid_dates = df[date_col].isna().sum()
+        if invalid_dates > 0:
+            logger.warning(
+                "Removed %d rows with invalid dates.",
+                invalid_dates,
+            )
+            df = df.dropna(subset=[date_col])
+
+        # Set date as index
         df.set_index(date_col, inplace=True)
+
+        # NEW: Remove duplicate timestamps
+        duplicate_rows = df.index.duplicated().sum()
+        if duplicate_rows > 0:
+            logger.warning(
+                "Removed %d duplicate timestamps.",
+                duplicate_rows,
+            )
+            df = df[~df.index.duplicated(keep="first")]
+
+        # NEW: Convert all price columns to numeric
+        df = df.apply(pd.to_numeric, errors="coerce")
+
+        # Sort chronologically
         df.sort_index(inplace=True)
-        
-        # Handle missing data: Forward fill first, then backward fill early gaps
+
+        # NEW: Verify chronological order
+        if not df.index.is_monotonic_increasing:
+            raise ValueError("Price index is not sorted.")
+
+        # Handle missing data
         missing_count = df.isna().sum().sum()
         if missing_count > 0:
             logger.info(f"Filling {missing_count} missing values in price data.")
             df = df.ffill().bfill()
-            
+
+        # NEW: Remove columns that are entirely NaN
+        empty_columns = df.columns[df.isna().all()]
+        if len(empty_columns) > 0:
+            logger.warning(
+                "Dropping empty asset columns: %s",
+                list(empty_columns),
+            )
+            df = df.drop(columns=empty_columns)
+
         return df
+        
 
     def load_asset_metadata(self, filename: str = "asset_metadata.csv") -> pd.DataFrame:
         """
