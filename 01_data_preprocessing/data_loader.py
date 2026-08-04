@@ -61,9 +61,24 @@ class DataLoader:
             if df.empty:
                 logger.warning(f"Loaded file '{filename}' is empty.")
             return df
+        except pd.errors.EmptyDataError:
+            logger.error(f"File '{filename}' is empty.")
+            raise ValueError(f"'{filename}' contains no data.")
+
+        except pd.errors.ParserError as e:
+            logger.error(f"CSV parsing error in '{filename}': {e}")
+            raise ValueError(f"'{filename}' is not a valid CSV file.") from e
+
+        except OSError as e:
+            logger.error(f"File system error while reading '{filename}': {e}")
+            raise
+
         except Exception as e:
-            logger.exception("Full error while reading CSV:")
-            raise    
+            logger.exception(f"Unexpected error while reading '{filename}'.")
+            raise
+
+
+        
     def load_historical_prices(self, filename: str = "historical_prices.csv") -> pd.DataFrame:
         """
         Loads and cleans historical asset price data.
@@ -175,8 +190,9 @@ class DataLoader:
         logger.info(f"Loading market scenarios from {filename}")
         return self._load_csv(filename)
 if __name__ == "__main__":
-    loader = DataLoader("../data")   # Adjust path if needed
-
+    # Adjust path if needed
+    project_root = Path(__file__).resolve().parent.parent
+    loader = DataLoader(project_root / "data")
     prices = loader.load_historical_prices()
     print("\nHistorical Prices")
     print(prices.head())
