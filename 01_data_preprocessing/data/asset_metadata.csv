@@ -1,0 +1,6 @@
+Ticker,Asset_Class,Sector,Risk_Profile
+AAPL,Equity,Technology,High
+MSFT,Equity,Technology,High
+JPM,Equity,Financials,Medium
+GLD,Commodity,Precious Metals,Medium
+TLT,Fixed Income,Government Bonds,Low
