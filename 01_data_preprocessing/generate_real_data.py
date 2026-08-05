@@ -63,4 +63,4 @@ def generate_data():
     print("\nData generation complete. All files populated in the root /data/ directory.")
 
 if __name__ == "__main__":
-    generate_data()
+    generate_data()  
