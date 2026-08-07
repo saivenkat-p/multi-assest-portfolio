@@ -384,8 +384,7 @@ class VQEPortfolioSolver:
                 )
             ), 
            
-           
-           
+
             "optimizer_result": self._safe_getattr(result, "optimizer_result"),
             "optimal_value": self._safe_getattr(result, "optimal_value"),
             "optimal_parameters_dict": self._safe_getattr(result, "optimal_parameters"),
