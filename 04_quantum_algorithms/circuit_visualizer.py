@@ -714,10 +714,10 @@ if __name__ == "__main__":
         print(exc)
 
     # -----------------------------------------------------------------
-    # Test 6: Empty Circuit
+    # Test 6: zero-operation circuit
     # -----------------------------------------------------------------
 
-    print("\n[TEST 6] Empty Circuit")
+    print("\n[TEST 6] zero-operation circuit")
 
     try:
         zero_operation = QuantumCircuit(1)
