@@ -44,3 +44,9 @@
 - **Commit 5:** `docs: document target quantum architecture and PennyLane integration`
   - Replaced outdated Qiskit architectural overview in `docs/architecture.md` with complete PennyLane-native system architecture.
   - Documented end-to-end data pipeline: market preprocessing, regime classification, QUBO formulation, Ising mapping, PennyLane QAOA/VQE solvers, and dashboard integration.
+
+- **Commit 6:** `feat: implement PennyLane Hamiltonian construction`
+  - Created `quantum_algorithms/hamiltonian.py` for exact algebraic QUBO-to-Ising translation: $x_i = (I - Z_i)/2$.
+  - Preserved constant scalar energy offset $c_0 = \lambda + \frac{1}{4} \sum_{i,j} Q_{ij} + \frac{1}{4} \sum_i Q_{ii}$ alongside linear and quadratic interaction operators.
+  - Implemented standard transverse-field QAOA mixer Hamiltonian generator.
+  - Added `build_pennylane_hamiltonian` method to `optimization/hamiltonian_builder.py`.

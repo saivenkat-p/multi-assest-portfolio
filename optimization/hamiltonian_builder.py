@@ -481,3 +481,24 @@ class HamiltonianBuilder:
                 exc,
             )
             raise
+
+    def build_pennylane_hamiltonian(
+        self,
+        expected_returns: np.ndarray,
+        covariance_matrix: np.ndarray,
+        include_offset: bool = True,
+    ):
+        """
+        Build and return a native PennyLane Ising Hamiltonian directly from financial inputs.
+
+        Args:
+            expected_returns: 1D array of expected asset returns.
+            covariance_matrix: 2D asset return covariance matrix.
+            include_offset: Whether to include constant energy offset term.
+
+        Returns:
+            PennyLane Hamiltonian representing the portfolio optimization problem.
+        """
+        Q, offset = self.build_qubo(expected_returns, covariance_matrix)
+        from quantum_algorithms.hamiltonian import qubo_to_pennylane_hamiltonian
+        return qubo_to_pennylane_hamiltonian(Q, offset, include_offset=include_offset)
