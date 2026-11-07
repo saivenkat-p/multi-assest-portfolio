@@ -22,3 +22,8 @@
   - Retain `optimization/hamiltonian_builder.py` as pure NumPy QUBO generator, adding dedicated PennyLane Hamiltonian conversion module.
   - Standardize bitstring indexing canonically across PennyLane QNodes to eliminate endianness inversion bugs.
   - Replace Qiskit primitives with PennyLane QNodes (`default.qubit` statevector and shot-based simulation).
+
+- **Commit 2:** `test: establish baseline quantum and portfolio test suites`
+  - Created initial test suites in `tests/test_constraints.py`, `tests/test_metrics.py`, `tests/test_regime.py`, and `tests/test_hamiltonian.py`.
+  - Validated portfolio metrics calculation, risk-budget penalty math, rolling and EWMA volatility, cross-correlations, and QUBO matrix construction symmetry and dimensions.
+  - Executed tests successfully with `pytest`.
