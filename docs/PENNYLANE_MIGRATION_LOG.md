@@ -55,3 +55,9 @@
   - Created `tests/test_energy_equivalence.py`.
   - Verified exact numerical energy agreement between classical QUBO ($b^T Q b + \lambda$) and quantum expectation ($\langle b | \hat{H} | b \rangle$) across all computational basis states ($2^M$ for $M \in \{2, 3, 4, 5\}$) within $10^{-10}$ tolerance.
   - Confirmed minimum eigenvalue from exact diagonalization matches brute-force optimal bitstring energy.
+
+- **Commit 8:** `test: validate portfolio constraint encoding and bitstring decoding`
+  - Created centralized decoding module `quantum_algorithms/decoding.py` with canonical big-endian wire interpretation.
+  - Implemented raw discrete weight mapping $w_i = V_i / (2^B - 1)$ and simplex normalization $\sum w_i = 1$.
+  - Added uniform $1/N$ fallback for all-zero measurement bitstrings.
+  - Added unit test suite in `tests/test_decoding.py`.
