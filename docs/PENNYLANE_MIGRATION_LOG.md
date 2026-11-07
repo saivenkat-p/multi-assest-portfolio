@@ -50,3 +50,8 @@
   - Preserved constant scalar energy offset $c_0 = \lambda + \frac{1}{4} \sum_{i,j} Q_{ij} + \frac{1}{4} \sum_i Q_{ii}$ alongside linear and quadratic interaction operators.
   - Implemented standard transverse-field QAOA mixer Hamiltonian generator.
   - Added `build_pennylane_hamiltonian` method to `optimization/hamiltonian_builder.py`.
+
+- **Commit 7:** `test: verify QUBO to Ising energy equivalence across all basis states`
+  - Created `tests/test_energy_equivalence.py`.
+  - Verified exact numerical energy agreement between classical QUBO ($b^T Q b + \lambda$) and quantum expectation ($\langle b | \hat{H} | b \rangle$) across all computational basis states ($2^M$ for $M \in \{2, 3, 4, 5\}$) within $10^{-10}$ tolerance.
+  - Confirmed minimum eigenvalue from exact diagonalization matches brute-force optimal bitstring energy.
