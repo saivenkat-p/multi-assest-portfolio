@@ -40,3 +40,7 @@
   - Added support for PennyLane native differentiable optimizers (Adam, GradientDescent, SPSA) using `qml.numpy`.
   - Implemented `OptimizationResult` standardized output contract.
   - Added test suite in `tests/test_optimizer.py`.
+
+- **Commit 5:** `docs: document target quantum architecture and PennyLane integration`
+  - Replaced outdated Qiskit architectural overview in `docs/architecture.md` with complete PennyLane-native system architecture.
+  - Documented end-to-end data pipeline: market preprocessing, regime classification, QUBO formulation, Ising mapping, PennyLane QAOA/VQE solvers, and dashboard integration.
