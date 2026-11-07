@@ -27,3 +27,9 @@
   - Created initial test suites in `tests/test_constraints.py`, `tests/test_metrics.py`, `tests/test_regime.py`, and `tests/test_hamiltonian.py`.
   - Validated portfolio metrics calculation, risk-budget penalty math, rolling and EWMA volatility, cross-correlations, and QUBO matrix construction symmetry and dimensions.
   - Executed tests successfully with `pytest`.
+
+- **Commit 3:** `refactor: isolate quantum backend interfaces for PennyLane`
+  - Replaced Qiskit primitive factory in `quantum_algorithms/backend.py` with native PennyLane device provisioning.
+  - Implemented `create_device`, `validate_device_name`, `validate_wires`, and `validate_shots`.
+  - Added support for `default.qubit` and graceful fallback for `lightning.qubit`.
+  - Added unit test suite in `tests/test_backend.py`.

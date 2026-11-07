@@ -1,87 +1,63 @@
 """
-Module: 04_quantum_algorithms.backend
+Module: quantum_algorithms.backend
 
 Project:
-Adaptive Regime-Aware Quantum Portfolio Optimizer (ARQPO)
+    Adaptive Regime-Aware Quantum Portfolio Optimizer (ARQPO)
 
 Purpose:
-Centralized provisioning of quantum execution primitives used by
-QAOA and VQE solvers. This module abstracts backend-specific
-initialization, validates configuration, and provides a stable,
-production-ready interface for obtaining Qiskit primitives.
+    Centralized provisioning and management of PennyLane quantum execution devices.
+    Abstracts device initialization, shot configuration, seed determinism,
+    and simulator backend selection for QAOA and VQE solvers.
 
 Workflow Position:
-03_optimization
-│
-▼
-hamiltonian_builder.py
-│
-▼
-backend.py
-├────────► optimizer.py
-├────────► ansatz.py
-├────────► qaoa_solver.py
-└────────► vqe_solver.py
-│
-▼
-05_classical_baseline
-06_validation
-07_evaluation
+    optimization/hamiltonian_builder.py
+            │
+            ▼
+    quantum_algorithms/backend.py  <-- (Current Module)
+            ├──► optimizer.py
+            ├──► ansatz.py
+            ├──► qaoa_solver.py
+            └──► vqe_solver.py
 
 Design Philosophy:
-- Centralized backend provisioning.
-- Fail-fast validation.
-- Registry-based backend selection.
-- Backward compatible public API.
-- Compatible with future simulator and hardware backends.
-- Minimal coupling with quantum algorithms.
-
-Author:
-ARQPO Development Team
+    - Pure PennyLane device provisioning (default.qubit, lightning.qubit).
+    - Separation of exact statevector and shot-based simulation.
+    - Explicit reproducibility via seed control.
+    - Defensive validation and graceful fallback.
+    - Zero Qiskit runtime dependencies.
 """
 
 from __future__ import annotations
 
 import logging
-import time 
-from typing import Any, Dict, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Union
 
-from qiskit.primitives import (
-    StatevectorEstimator,
-    StatevectorSampler,
-)
+import pennylane as qml
 
 # =============================================================================
 # Module Constants
 # =============================================================================
 
-DEFAULT_BACKEND: str = "local_statevector"
+DEFAULT_DEVICE: str = "default.qubit"
+LIGHTNING_DEVICE: str = "lightning.qubit"
 
-LOCAL_BACKENDS: Set[str] = {
-    "local",
-    "local_statevector",
-    "statevector",
+SUPPORTED_DEVICES: Set[str] = {
+    "default.qubit",
+    "lightning.qubit",
+    "local_statevector",  # Legacy compatibility alias -> default.qubit
+    "statevector",        # Legacy compatibility alias -> default.qubit
 }
 
-HARDWARE_BACKENDS: Set[str] = {
-    "hardware",
-    "ibmq",
-    "qpu",
-}
-
-SUPPORTED_BACKENDS: Set[str] = (
-    LOCAL_BACKENDS | HARDWARE_BACKENDS
-)
-
-DEFAULT_OPTIONS: Dict[str, Any] = {
-    "shots": None,
-}
+MIN_WIRES: int = 1
+MAX_WIRES: int = 30  # Practical limit for local full statevector simulation
 
 # =============================================================================
 # Logger Configuration
 # =============================================================================
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -91,420 +67,217 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-logger.setLevel(logging.INFO)
+
+# =============================================================================
+# Configuration Data Model
+# =============================================================================
+
+@dataclass(frozen=True)
+class DeviceConfig:
+    """
+    Immutable configuration for a PennyLane quantum execution device.
+
+    Attributes:
+        device_name: Name of the PennyLane device plugin (default: 'default.qubit').
+        wires: Number of quantum wires (qubits) or sequence of wire labels.
+        shots: Number of measurement shots (None for exact analytic statevector).
+        seed: Random seed for deterministic simulation.
+        extra_options: Additional device-specific keyword arguments.
+    """
+    device_name: str = DEFAULT_DEVICE
+    wires: int = 1
+    shots: Optional[int] = None
+    seed: Optional[int] = 42
+    extra_options: Dict[str, Any] = field(default_factory=dict)
+
 
 # =============================================================================
 # Validation Helpers
 # =============================================================================
 
-
-def _validate_backend_name(backend_type: str) -> str:
+def validate_device_name(name: str) -> str:
     """
-    Validate and normalize the requested backend name.
+    Validate and normalize the requested quantum device name.
 
     Args:
-        backend_type:
-            Backend identifier supplied by the caller.
+        name: Device identifier string.
 
     Returns:
-        Normalized backend identifier.
+        Normalized canonical device name.
 
     Raises:
-        TypeError:
-            If backend_type is not a string.
-
-        ValueError:
-            If backend_type is empty or unsupported.
+        TypeError: If name is not a string.
+        ValueError: If device is not supported.
     """
-    if not isinstance(backend_type, str):
-        raise TypeError(
-            "backend_type must be a string."
-        )
+    if not isinstance(name, str):
+        raise TypeError(f"Device name must be a string, got {type(name).__name__}.")
 
-    normalized = backend_type.strip().lower()
+    normalized = name.strip().lower()
 
-    if not normalized:
+    # Map legacy aliases
+    if normalized in {"local_statevector", "statevector", "default", "aer_simulator"}:
+        return DEFAULT_DEVICE
+
+    if normalized not in SUPPORTED_DEVICES:
         raise ValueError(
-            "backend_type cannot be empty."
-        )
-
-    if normalized not in SUPPORTED_BACKENDS:
-        raise ValueError(
-            f"Unsupported backend '{backend_type}'. "
-            f"Supported backends: "
-            f"{sorted(SUPPORTED_BACKENDS)}"
+            f"Unsupported quantum device '{name}'. "
+            f"Supported devices: {sorted(SUPPORTED_DEVICES)}"
         )
 
     return normalized
 
 
-def _validate_options(
-    options: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
+def validate_wires(wires: Union[int, List[Any]]) -> int:
     """
-    Validate backend configuration options.
+    Validate wire count for quantum simulation.
 
     Args:
-        options:
-            Optional backend configuration dictionary.
+        wires: Integer count of wires or list of wire identifiers.
 
     Returns:
-        Validated configuration dictionary.
+        Total number of wires.
 
     Raises:
-        TypeError:
-            If options is not a dictionary.
-
-        ValueError:
-            If configuration values are invalid.
+        TypeError: If wires is neither integer nor list.
+        ValueError: If wire count is outside allowable range.
     """
-    if options is None:
-        return DEFAULT_OPTIONS.copy()
+    if isinstance(wires, int):
+        num_wires = wires
+    elif isinstance(wires, (list, tuple)):
+        num_wires = len(wires)
+    else:
+        raise TypeError(f"wires must be int or sequence, got {type(wires).__name__}.")
 
-    if not isinstance(options, dict):
-        raise TypeError(
-            "options must be a dictionary."
+    if num_wires < MIN_WIRES:
+        raise ValueError(f"Wire count must be at least {MIN_WIRES}, got {num_wires}.")
+
+    if num_wires > MAX_WIRES:
+        raise ValueError(
+            f"Requested {num_wires} wires exceeds local simulation safety limit of {MAX_WIRES}."
         )
 
-    validated = DEFAULT_OPTIONS.copy()
-    validated.update(options)
-
-    shots = validated.get("shots")
-
-    if shots is not None:
-        if not isinstance(shots, int):
-            raise TypeError(
-                "'shots' must be an integer."
-            )
-
-        if shots <= 0:
-            raise ValueError(
-                "'shots' must be greater than zero."
-            )
-
-    return validated
-
-# =============================================================================
-# Primitive Construction Helpers
-# =============================================================================
+    return num_wires
 
 
-def _create_statevector_sampler(
-    options: Dict[str, Any],
-) -> StatevectorSampler:
+def validate_shots(shots: Optional[int]) -> Optional[int]:
     """
-    Create a StatevectorSampler instance.
+    Validate shot count for quantum measurement.
 
     Args:
-        options:
-            Validated backend configuration.
+        shots: Integer number of shots, or None for analytic statevector.
 
     Returns:
-        Configured StatevectorSampler instance.
-    """
-    logger.debug("Creating StatevectorSampler.")
-
-    return StatevectorSampler(
-        default_shots=options.get("shots")
-    )
-
-
-def _create_statevector_estimator(
-    options: Dict[str, Any],
-) -> StatevectorEstimator:
-    """
-    Create a StatevectorEstimator instance.
-
-    Args:
-        options:
-            Validated backend configuration.
-
-    Returns:
-        Configured StatevectorEstimator instance.
-    """
-    logger.debug("Creating StatevectorEstimator.")
-
-    return StatevectorEstimator(
-        default_precision=0.0 
-    )
-
-
-# =============================================================================
-# Backend Builders
-# =============================================================================
-
-
-def _build_local_backend(
-    options: Dict[str, Any],
-) -> Tuple[StatevectorSampler, StatevectorEstimator]:
-    """
-    Construct primitives for exact local statevector simulation.
-
-    Args:
-        options:
-            Validated backend configuration.
-
-    Returns:
-        Tuple containing the sampler and estimator primitives.
-    """
-    logger.info(
-        "Initializing local Statevector backend."
-    )
-
-    sampler = _create_statevector_sampler(options)
-    estimator = _create_statevector_estimator(options)
-
-    logger.info(
-        "Local Statevector backend initialized successfully."
-    )
-
-    return sampler, estimator
-
-
-def _build_hardware_backend(
-    options: Dict[str, Any],
-) -> Tuple[Any, Any]:
-    """
-    Placeholder for IBM Runtime / QPU execution.
-
-    Args:
-        options:
-            Validated backend configuration.
+        Validated shots value.
 
     Raises:
-        NotImplementedError:
-            Hardware execution is not yet implemented.
+        TypeError: If shots is not int or None.
+        ValueError: If shots is <= 0.
     """
-    logger.error(
-        "Hardware backend requested but is not available."
-    )
+    if shots is None:
+        return None
 
-    raise NotImplementedError(
-        "Hardware execution requires "
-        "'qiskit-ibm-runtime' and active credentials. "
-        "Support will be added in a future ARQPO release."
-    )
+    if not isinstance(shots, int):
+        raise TypeError(f"shots must be an integer or None, got {type(shots).__name__}.")
 
+    if shots <= 0:
+        raise ValueError(f"shots must be greater than zero, got {shots}.")
 
-# =============================================================================
-# Backend Registry
-# =============================================================================
+    return shots
 
-_BACKEND_BUILDERS = {
-    "local": _build_local_backend,
-    "local_statevector": _build_local_backend,
-    "statevector": _build_local_backend,
-    "hardware": _build_hardware_backend,
-    "ibmq": _build_hardware_backend,
-    "qpu": _build_hardware_backend,
-}
 
 # =============================================================================
-# Public API
+# Factory Functions
 # =============================================================================
 
-def get_primitives(
-    backend_type: str = DEFAULT_BACKEND,
-    options: Optional[Dict[str, Any]] = None,
-) -> Tuple[Any, Any]:
+def create_device(
+    device_name: str = DEFAULT_DEVICE,
+    wires: int = 1,
+    shots: Optional[int] = None,
+    seed: Optional[int] = 42,
+    **kwargs: Any,
+) -> qml.devices.Device:
     """
-    Provision Qiskit primitives for the requested execution backend.
-
-    This function serves as the public entry point for obtaining
-    Sampler and Estimator primitives used by the ARQPO quantum
-    optimization algorithms.
+    Instantiate and return a configured PennyLane quantum device.
 
     Args:
-        backend_type:
-            Backend identifier.
-
-        options:
-            Optional backend configuration.
+        device_name: Device identifier ('default.qubit', 'lightning.qubit').
+        wires: Number of quantum wires.
+        shots: Measurement shot count (None for analytic expectation values).
+        seed: Random seed for reproducible simulation.
+        **kwargs: Additional device parameters.
 
     Returns:
-        Tuple containing:
-
-        - Sampler primitive
-        - Estimator primitive
+        Configured PennyLane Device instance.
 
     Raises:
-        TypeError:
-            If the supplied arguments have invalid types.
-
-        ValueError:
-            If the backend configuration is invalid.
-
-        RuntimeError:
-            If backend initialization fails.
-
-        NotImplementedError:
-            If the requested backend is not implemented.
+        RuntimeError: If device construction fails and fallback fails.
     """
-    
+    normalized_name = validate_device_name(device_name)
+    validated_wires = validate_wires(wires)
+    validated_shots = validate_shots(shots)
 
-    start_time = time.perf_counter()
+    logger.info(
+        "Initializing PennyLane device '%s' (wires=%d, shots=%s, seed=%s)",
+        normalized_name,
+        validated_wires,
+        validated_shots,
+        seed,
+    )
+
+    device_kwargs: Dict[str, Any] = dict(kwargs)
+    if seed is not None:
+        device_kwargs["seed"] = seed
+    if validated_shots is not None:
+        device_kwargs["shots"] = validated_shots
 
     try:
-        logger.info(
-            "Initializing backend '%s'.",
-            backend_type,
+        device = qml.device(
+            normalized_name,
+            wires=validated_wires,
+            **device_kwargs,
         )
-
-        backend = _validate_backend_name(
-            backend_type
-        )
-
-        validated_options = _validate_options(
-            options
-        )
-
-        builder = _BACKEND_BUILDERS[backend]
-
-        sampler, estimator = builder(
-            validated_options
-        )
-
-        elapsed = time.perf_counter() - start_time
-
-        logger.info(
-            "Backend '%s' initialized successfully "
-            "(%.6f seconds).",
-            backend,
-            elapsed,
-        )
-
-        return sampler, estimator
-    
-    except NotImplementedError:
-        raise
+        logger.info("PennyLane device '%s' initialized successfully.", normalized_name)
+        return device
 
     except Exception as exc:
-        logger.exception(
-            "Backend initialization failed."
-        )
+        if normalized_name != DEFAULT_DEVICE:
+            logger.warning(
+                "Failed to initialize '%s': %s. Falling back to '%s'.",
+                normalized_name,
+                exc,
+                DEFAULT_DEVICE,
+            )
+            try:
+                device = qml.device(
+                    DEFAULT_DEVICE,
+                    wires=validated_wires,
+                    **device_kwargs,
+                )
+                logger.info("Fallback to '%s' successful.", DEFAULT_DEVICE)
+                return device
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    f"Fallback device initialization failed: {fallback_exc}"
+                ) from fallback_exc
+
         raise RuntimeError(
-            f"Failed to initialize backend "
-            f"'{backend_type}'."
+            f"Failed to initialize PennyLane device '{normalized_name}': {exc}"
         ) from exc
 
 
-# =============================================================================
-# Runtime Tests
-# =============================================================================
+def is_analytic(device: Any) -> bool:
+    """
+    Check if a device operates in exact analytic (statevector) mode.
 
+    Args:
+        device: PennyLane Device instance.
 
-def _runtime_test_local_backend() -> None:
-    """Verify successful local backend initialization."""
-    sampler, estimator = get_primitives()
-
-    assert sampler is not None
-    assert estimator is not None
-
-    print("✓ Runtime Test 1 Passed")
-
-
-def _runtime_test_backend_aliases() -> None:
-    """Verify backend aliases resolve correctly."""
-    aliases = [
-        "local",
-        "statevector",
-        "local_statevector",
-    ]
-
-    for alias in aliases:
-        sampler, estimator = get_primitives(alias)
-        assert sampler is not None
-        assert estimator is not None
-
-    print("✓ Runtime Test 2 Passed")
-
-
-def _runtime_test_invalid_backend() -> None:
-    """Verify invalid backend rejection."""
-    try:
-        get_primitives("invalid_backend")
-    except RuntimeError:
-        print("✓ Runtime Test 3 Passed")
-        return
-
-    raise AssertionError(
-        "Invalid backend accepted."
-    )
-
-
-def _runtime_test_invalid_options() -> None:
-    """Verify option validation."""
-    try:
-        get_primitives(
-            options="invalid"  # type: ignore
-        )
-    except RuntimeError:
-        print("✓ Runtime Test 4 Passed")
-        return
-
-    raise AssertionError(
-        "Invalid options accepted."
-    )
-
-
-def _runtime_test_invalid_shots() -> None:
-    """Verify invalid shot values."""
-    try:
-        get_primitives(
-            options={
-                "shots": -5
-            }
-        )
-    except RuntimeError:
-        print("✓ Runtime Test 5 Passed")
-        return
-
-    raise AssertionError(
-        "Negative shots accepted."
-    )
-
-
-def _runtime_test_hardware_backend() -> None:
-    """Verify hardware backend placeholder."""
-    try:
-        get_primitives("hardware")
-    except RuntimeError:
-        print("✓ Runtime Test 6 Passed")
-        return
-
-    raise AssertionError(
-        "Hardware backend unexpectedly initialized."
-    )
-
-
-def _runtime_test_reproducibility() -> None:
-    """Verify repeated initialization succeeds."""
-    sampler1, estimator1 = get_primitives()
-    sampler2, estimator2 = get_primitives()
-
-    assert type(sampler1) is type(sampler2)
-    assert type(estimator1) is type(estimator2)
-
-    print("✓ Runtime Test 7 Passed")
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("ARQPO Backend Runtime Tests")
-    print("=" * 60)
-
-    _runtime_test_local_backend()
-    _runtime_test_backend_aliases()
-    _runtime_test_invalid_backend()
-    _runtime_test_invalid_options()
-    _runtime_test_invalid_shots()
-    _runtime_test_hardware_backend()
-    _runtime_test_reproducibility()
-
-    print("=" * 60)
-    print("All backend runtime tests passed successfully.")
-    print("=" * 60)
+    Returns:
+        True if exact analytic simulation without shot noise, False otherwise.
+    """
+    shots = getattr(device, "shots", None)
+    if shots is None:
+        return True
+    if hasattr(shots, "total_shots"):
+        return shots.total_shots is None
+    return shots == 0 or shots is None
