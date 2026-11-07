@@ -33,3 +33,10 @@
   - Implemented `create_device`, `validate_device_name`, `validate_wires`, and `validate_shots`.
   - Added support for `default.qubit` and graceful fallback for `lightning.qubit`.
   - Added unit test suite in `tests/test_backend.py`.
+
+- **Commit 4:** `feat: introduce PennyLane optimizer abstraction and factory`
+  - Replaced Qiskit optimizer dependencies with a unified optimization abstraction in `quantum_algorithms/optimizer.py`.
+  - Added support for classical SciPy optimizers (COBYLA, SLSQP, Nelder-Mead) with trajectory tracking.
+  - Added support for PennyLane native differentiable optimizers (Adam, GradientDescent, SPSA) using `qml.numpy`.
+  - Implemented `OptimizationResult` standardized output contract.
+  - Added test suite in `tests/test_optimizer.py`.

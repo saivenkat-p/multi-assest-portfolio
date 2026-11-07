@@ -1,86 +1,61 @@
 """
-===============================================================================
-Module: 04_quantum_algorithms.optimizer
-Project: Adaptive Regime-Aware Quantum Portfolio Optimizer (ARQPO)
+Module: quantum_algorithms.optimizer
+
+Project:
+    Adaptive Regime-Aware Quantum Portfolio Optimizer (ARQPO)
 
 Description:
-    Centralized factory for constructing classical optimizers used by hybrid
-    quantum optimization algorithms within ARQPO.
-
-    This module provides a production-quality abstraction over Qiskit's
-    classical optimizers, ensuring consistent configuration, validation,
-    logging, deterministic behavior, and backward compatibility across
-    QAOA and VQE workflows.
+    Centralized factory and abstraction for classical and gradient-based
+    optimizers used across PennyLane QAOA and VQE hybrid optimization pipelines.
 
 Workflow Position:
-    Hamiltonian Builder
+    optimization/hamiltonian_builder.py
             │
             ▼
-       Ansatz Builder
+       backend.py
             │
             ▼
-    Quantum Optimizer Factory   <-- (Current Module)
-            │
-            ├──────────────► QAOA Solver
-            │
-            └──────────────► VQE Solver
+    quantum_algorithms/optimizer.py  <-- (Current Module)
+            ├──► qaoa_solver.py
+            └──► vqe_solver.py
 
 Responsibilities:
-    • Validate optimizer configuration.
-    • Construct supported Qiskit optimizers.
-    • Centralize optimizer defaults.
-    • Provide compatibility-aware optimizer creation.
-    • Improve maintainability by avoiding duplicated optimizer logic.
-    • Preserve deterministic configuration across quantum solvers.
-
-Supported Optimizers:
-    • COBYLA
-    • SPSA
-    • SLSQP
-
-Design Philosophy:
-    This module acts as the single source of truth for classical optimizer
-    creation inside the ARQPO quantum stack. Individual quantum solvers
-    should never instantiate Qiskit optimizers directly.
-
-Author:
-    ARQPO Development Team
-
-===============================================================================
+    • Validate optimizer configurations.
+    • Support SciPy gradient-free and gradient-based optimizers (COBYLA, SLSQP, Nelder-Mead).
+    • Support PennyLane native optimizers (Adam, GradientDescent, SPSA).
+    • Provide a unified .minimize() interface returning structured OptimizationResult.
+    • Eliminate all legacy Qiskit algorithm dependencies.
 """
 
 from __future__ import annotations
 
 import logging
-import time 
-import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from qiskit_algorithms.optimizers import (
-    COBYLA,
-    SPSA,
-    SLSQP,
-    Optimizer,
-)
+import numpy as np
+import pennylane as qml
+from scipy.optimize import minimize as scipy_minimize
 
 # =============================================================================
 # Module Constants
 # =============================================================================
 
 DEFAULT_OPTIMIZER = "COBYLA"
-
 DEFAULT_MAX_ITERATIONS = 100
-
-DEFAULT_TOLERANCE: Optional[float] = None
-
+DEFAULT_TOLERANCE = 1e-6
+DEFAULT_STEPSIZE = 0.05
 FLOAT_TOLERANCE = 1e-12
 
 SUPPORTED_OPTIMIZERS = (
     "COBYLA",
-    "SPSA",
     "SLSQP",
+    "SPSA",
+    "ADAM",
+    "GRADIENT_DESCENT",
+    "NELDER-MEAD",
 )
 
 # =============================================================================
@@ -88,6 +63,7 @@ SUPPORTED_OPTIMIZERS = (
 # =============================================================================
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -97,843 +73,260 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-logger.setLevel(logging.INFO)
 
 # =============================================================================
 # Optimizer Enumeration
 # =============================================================================
 
-
 class OptimizerType(str, Enum):
-    """
-    Enumeration of supported classical optimizers.
-
-    Using an enumeration prevents invalid string usage throughout
-    the quantum optimization pipeline.
-    """
-
+    """Supported classical and quantum optimizers."""
     COBYLA = "COBYLA"
-    SPSA = "SPSA"
     SLSQP = "SLSQP"
+    SPSA = "SPSA"
+    ADAM = "ADAM"
+    GRADIENT_DESCENT = "GRADIENT_DESCENT"
+    NELDER_MEAD = "NELDER-MEAD"
 
 
 # =============================================================================
-# Optimizer Configuration
+# Result and Configuration Data Models
 # =============================================================================
+
+@dataclass
+class OptimizationResult:
+    """
+    Standardized result structure returned by all optimizer executions.
+
+    Attributes:
+        optimal_params: Final optimized parameter array.
+        optimal_value: Final objective cost value.
+        iterations: Number of optimization steps completed.
+        cost_history: Sequence of objective values recorded during optimization.
+        success: Whether optimization terminated successfully.
+        message: Status or termination message.
+    """
+    optimal_params: np.ndarray
+    optimal_value: float
+    iterations: int
+    cost_history: List[float] = field(default_factory=list)
+    success: bool = True
+    message: str = "Optimization completed successfully."
 
 
 @dataclass(frozen=True)
 class OptimizerConfig:
     """
-    Immutable configuration describing a classical optimizer.
+    Configuration describing an optimizer.
 
-    Parameters
-    ----------
-    optimizer_name : str
-        Name of the optimizer.
-
-    maxiter : int
-        Maximum optimization iterations.
-
-    tol : Optional[float]
-        Numerical convergence tolerance.
+    Parameters:
+        optimizer_name: Name of the optimizer algorithm.
+        maxiter: Maximum optimization iterations or function evaluations.
+        tol: Convergence tolerance (for SciPy methods).
+        stepsize: Learning rate (for gradient-based methods like Adam).
     """
-
     optimizer_name: str = DEFAULT_OPTIMIZER
     maxiter: int = DEFAULT_MAX_ITERATIONS
     tol: Optional[float] = DEFAULT_TOLERANCE
+    stepsize: float = DEFAULT_STEPSIZE
 
 
 # =============================================================================
 # Validation Helpers
 # =============================================================================
 
-
 def _validate_optimizer_name(name: str) -> str:
-    """
-    Validate the optimizer name.
-
-    Args:
-        name:
-            Optimizer identifier.
-
-    Returns:
-        Normalized optimizer name.
-
-    Raises:
-        TypeError:
-            If the optimizer name is not a string.
-
-        ValueError:
-            If the optimizer is unsupported.
-    """
-
+    """Validate and normalize optimizer name."""
     if not isinstance(name, str):
-        raise TypeError(
-            "optimizer_name must be a string."
-        )
+        raise TypeError(f"Optimizer name must be a string, got {type(name).__name__}.")
 
     normalized = name.strip().upper()
-
     if normalized not in SUPPORTED_OPTIMIZERS:
         raise ValueError(
-            f"Unsupported optimizer '{name}'. "
-            f"Supported optimizers: {SUPPORTED_OPTIMIZERS}"
+            f"Unsupported optimizer '{name}'. Supported optimizers: {SUPPORTED_OPTIMIZERS}"
         )
-
     return normalized
 
 
 def _validate_max_iterations(maxiter: int) -> int:
-    """
-    Validate the maximum iteration count.
-
-    Args:
-        maxiter:
-            Requested iteration limit.
-
-    Returns:
-        Validated iteration count.
-
-    Raises:
-        TypeError:
-            If maxiter is not an integer.
-
-        ValueError:
-            If maxiter is less than one.
-    """
-
+    """Validate iteration limit."""
     if not isinstance(maxiter, int):
-        raise TypeError(
-            "maxiter must be an integer."
-        )
-
-    if maxiter < 1:
-        raise ValueError(
-            "maxiter must be greater than zero."
-        )
-
+        raise TypeError(f"maxiter must be an integer, got {type(maxiter).__name__}.")
+    if maxiter <= 0:
+        raise ValueError(f"maxiter must be greater than zero, got {maxiter}.")
     return maxiter
 
 
-def _validate_tolerance(
-    tol: Optional[float],
-) -> Optional[float]:
-    """
-    Validate numerical convergence tolerance.
-
-    Args:
-        tol:
-            Optimization tolerance.
-
-    Returns:
-        Validated tolerance.
-
-    Raises:
-        TypeError:
-            If tolerance has an invalid datatype.
-
-        ValueError:
-            If tolerance is negative, NaN, or infinite.
-    """
-
+def _validate_tolerance(tol: Optional[float]) -> Optional[float]:
+    """Validate convergence tolerance."""
     if tol is None:
         return None
-
     if not isinstance(tol, (int, float)):
-        raise TypeError(
-            "tol must be a numeric value or None."
-        )
+        raise TypeError(f"tol must be a float or int, got {type(tol).__name__}.")
+    if tol <= 0:
+        raise ValueError(f"tol must be greater than zero, got {tol}.")
+    return float(tol)
 
-    tol = float(tol)
-
-    if math.isnan(tol):
-        raise ValueError("tol cannot be NaN.")
-
-    if math.isinf(tol):
-        raise ValueError("tol cannot be infinite.")
-
-    if tol < 0:
-        raise ValueError(
-            "tol must be non-negative."
-        )
-
-    return tol
-
-
-def _validate_configuration(
-    config: OptimizerConfig,
-) -> OptimizerConfig:
-    """
-    Validate an optimizer configuration object.
-
-    Args:
-        config:
-            Optimizer configuration.
-
-    Returns:
-        Validated configuration.
-
-    Raises:
-        TypeError:
-            If configuration object is invalid.
-    """
-
-    if not isinstance(config, OptimizerConfig):
-        raise TypeError(
-            "config must be an OptimizerConfig instance."
-        )
-
-    validated_name = _validate_optimizer_name(
-        config.optimizer_name
-    )
-
-    validated_iter = _validate_max_iterations(
-        config.maxiter
-    )
-
-    validated_tol = _validate_tolerance(
-        config.tol
-    )
-
-    return OptimizerConfig(
-        optimizer_name=validated_name,
-        maxiter=validated_iter,
-        tol=validated_tol,
-    )
 
 # =============================================================================
-# Quantum Optimizer Factory
+# Optimizer Execution Adapters
 # =============================================================================
 
-
-class QuantumOptimizerFactory:
-    """
-    Factory responsible for constructing validated Qiskit optimizers.
-
-    This class centralizes optimizer creation to ensure that all quantum
-    algorithms within ARQPO use consistent optimizer configuration and
-    validation.
-
-    Notes:
-        • This class does not perform optimization itself.
-        • It only constructs configured optimizer instances.
-        • All optimizer-specific implementation details are isolated here.
-    """
-
-    def __init__(
+class BaseOptimizerAdapter:
+    """Base interface for optimizer adapters."""
+    def minimize(
         self,
-        config: OptimizerConfig,
-    ) -> None:
-        """
-        Initialize the optimizer factory.
-
-        Args:
-            config:
-                Optimizer configuration.
-
-        Raises:
-            TypeError:
-                If configuration is invalid.
-        """
-
-        self._config = _validate_configuration(config)
-
-        # Builder registry (initialized once)
-        self._builders = {
-            OptimizerType.COBYLA.value: self._build_cobyla,
-            OptimizerType.SPSA.value: self._build_spsa,
-            OptimizerType.SLSQP.value: self._build_slsqp,
-        }
+        cost_fn: Callable[[np.ndarray], float],
+        initial_params: np.ndarray,
+    ) -> OptimizationResult:
+        raise NotImplementedError
 
 
+class ScipyOptimizerAdapter(BaseOptimizerAdapter):
+    """Adapter for SciPy classical optimization algorithms."""
+    def __init__(self, method: str, maxiter: int, tol: Optional[float] = None) -> None:
+        self.method = method
+        self.maxiter = maxiter
+        self.tol = tol
 
+    def minimize(
+        self,
+        cost_fn: Callable[[np.ndarray], float],
+        initial_params: np.ndarray,
+    ) -> OptimizationResult:
+        cost_history: List[float] = []
 
-        logger.info(
-            "QuantumOptimizerFactory initialized "
-            "(optimizer=%s, maxiter=%d, tol=%s)",
-            self._config.optimizer_name,
-            self._config.maxiter,
-            self._config.tol,
+        def tracked_cost_fn(params: np.ndarray) -> float:
+            val = float(cost_fn(params))
+            cost_history.append(val)
+            return val
+
+        options: Dict[str, Any] = {"maxiter": self.maxiter}
+        if self.method == "COBYLA":
+            options["tol"] = self.tol or 1e-4
+
+        res = scipy_minimize(
+            tracked_cost_fn,
+            np.asarray(initial_params, dtype=float),
+            method=self.method,
+            tol=self.tol,
+            options=options,
         )
 
-    # -------------------------------------------------------------------------
-    # Internal Builder Methods
-    # -------------------------------------------------------------------------
-
-    def _build_cobyla(self) -> Optimizer:
-        """
-        Construct a COBYLA optimizer.
-
-        Returns:
-            Configured COBYLA optimizer.
-        """
-
-        logger.debug("Creating COBYLA optimizer.")
-
-        return COBYLA(
-            maxiter=self._config.maxiter,
-            tol=self._config.tol,
+        final_val = float(res.fun) if np.isfinite(res.fun) else (cost_history[-1] if cost_history else 0.0)
+        return OptimizationResult(
+            optimal_params=np.asarray(res.x, dtype=float),
+            optimal_value=final_val,
+            iterations=len(cost_history),
+            cost_history=cost_history,
+            success=bool(res.success),
+            message=str(res.message),
         )
 
-    def _build_spsa(self) -> Optimizer:
-        """
-        Construct an SPSA optimizer.
 
-        Notes:
-            SPSA ignores convergence tolerance because its stopping
-            behavior differs from gradient-based optimizers.
+class PennyLaneGradientOptimizerAdapter(BaseOptimizerAdapter):
+    """Adapter for PennyLane native optimizers (Adam, GradientDescent, SPSA)."""
+    def __init__(self, name: str, maxiter: int, stepsize: float) -> None:
+        self.name = name
+        self.maxiter = maxiter
+        self.stepsize = stepsize
 
-        Returns:
-            Configured SPSA optimizer.
-        """
+        if name == "ADAM":
+            self.opt = qml.AdamOptimizer(stepsize=stepsize)
+        elif name == "GRADIENT_DESCENT":
+            self.opt = qml.GradientDescentOptimizer(stepsize=stepsize)
+        elif name == "SPSA":
+            self.opt = qml.SPSAOptimizer(maxiter=maxiter)
+        else:
+            raise ValueError(f"Unknown PennyLane optimizer: {name}")
 
-        logger.debug("Creating SPSA optimizer.")
+    def minimize(
+        self,
+        cost_fn: Callable[[Any], float],
+        initial_params: np.ndarray,
+    ) -> OptimizationResult:
+        # PennyLane requires qml.numpy with requires_grad=True for autograd differentiation
+        params = qml.numpy.array(initial_params, requires_grad=True)
+        cost_history: List[float] = []
 
-        return SPSA(
-            maxiter=self._config.maxiter,
+        for step in range(self.maxiter):
+            params, cost = self.opt.step_and_cost(cost_fn, params)
+            cost_history.append(float(cost))
+
+        final_cost = float(cost_fn(params))
+        cost_history.append(final_cost)
+
+        return OptimizationResult(
+            optimal_params=np.asarray(params, dtype=float),
+            optimal_value=final_cost,
+            iterations=self.maxiter,
+            cost_history=cost_history,
+            success=True,
+            message="PennyLane optimization finished max iterations.",
         )
 
-    def _build_slsqp(self) -> Optimizer:
-        """
-        Construct an SLSQP optimizer.
-
-        Returns:
-            Configured SLSQP optimizer.
-        """
-
-        logger.debug("Creating SLSQP optimizer.")
-
-        return SLSQP(
-            maxiter=self._config.maxiter,
-            tol=self._config.tol,
-        )
-
-    # -------------------------------------------------------------------------
-    # Optimizer Dispatcher
-    # -------------------------------------------------------------------------
-
-    def build(self) -> Optimizer:
-        """
-        Build the requested optimizer.
-
-        Returns:
-            Configured Qiskit optimizer.
-
-        Raises:
-            RuntimeError:
-                If optimizer creation fails unexpectedly.
-        """
-
-        try:
-            start_time = time.perf_counter()
-            optimizer_name = self._config.optimizer_name
-
-            logger.info(
-                "Building optimizer '%s'.",
-                optimizer_name,
-            )
-
-            builder = self._builders.get(optimizer_name)
-
-            if builder is None:
-                raise ValueError(
-                    f"Unsupported optimizer: {optimizer_name}"
-                )
-
-            optimizer = builder()
-
-            logger.info(
-                "%s optimizer created successfully.",
-                optimizer_name,
-            )
-            
-            elapsed = time.perf_counter() - start_time
-
-            logger.info(
-                "Optimizer built in %.6f seconds.",
-                elapsed,
-            )
-            
-            return optimizer
-
-        except Exception as exc:
-
-            logger.exception(
-                "Optimizer construction failed."
-            )
-
-            raise RuntimeError(
-                "Failed to construct optimizer."
-            ) from exc
-
-    # -------------------------------------------------------------------------
-    # Utility Methods
-    # -------------------------------------------------------------------------
-
-    @staticmethod
-    def supported_optimizers() -> tuple[str, ...]:
-        """
-        Return all supported optimizer names.
-
-        Returns:
-            Tuple containing supported optimizer identifiers.
-        """
-
-        return  tuple(
-            optimizer.value
-            for optimizer in OptimizerType
-        )   
-
-    @staticmethod
-    def is_supported(
-        optimizer_name: str,
-    ) -> bool:
-        """
-        Check whether an optimizer is supported.
-
-        Args:
-            optimizer_name:
-                Name of optimizer.
-
-        Returns:
-            True if supported, otherwise False.
-        """
-
-        if not isinstance(optimizer_name, str):
-            return False
-
-        return (
-            optimizer_name.strip().upper()
-            in SUPPORTED_OPTIMIZERS
-        )
 
 # =============================================================================
-# Public API
+# Factory API
 # =============================================================================
-
 
 def get_optimizer(
     optimizer_name: str = DEFAULT_OPTIMIZER,
     maxiter: int = DEFAULT_MAX_ITERATIONS,
     tol: Optional[float] = DEFAULT_TOLERANCE,
-) -> Optimizer:
+    stepsize: float = DEFAULT_STEPSIZE,
+) -> BaseOptimizerAdapter:
     """
-    Create and return a configured Qiskit classical optimizer.
-
-    This function serves as the primary public interface for optimizer
-    construction within the ARQPO quantum optimization framework.
-    Both QAOA and VQE solvers should use this function instead of
-    directly instantiating Qiskit optimizer classes.
+    Construct and return a unified optimizer adapter.
 
     Args:
-        optimizer_name:
-            Name of the optimizer.
-
-        maxiter:
-            Maximum optimization iterations.
-
-        tol:
-            Numerical convergence tolerance.
+        optimizer_name: Optimizer algorithm identifier ('COBYLA', 'SLSQP', 'ADAM', etc.).
+        maxiter: Maximum optimization iterations.
+        tol: Convergence tolerance for SciPy optimizers.
+        stepsize: Step size for gradient-based optimizers.
 
     Returns:
-        Configured Qiskit Optimizer instance.
-
-    Raises:
-        RuntimeError:
-            If optimizer construction fails.
-
-    Example:
-        >>> optimizer = get_optimizer(
-        ...     optimizer_name="COBYLA",
-        ...     maxiter=200,
-        ...     tol=1e-6,
-        ... )
+        Configured BaseOptimizerAdapter with .minimize() method.
     """
+    normalized_name = _validate_optimizer_name(optimizer_name)
+    validated_maxiter = _validate_max_iterations(maxiter)
+    validated_tol = _validate_tolerance(tol)
 
-    logger.info(
-        "Received optimizer request "
-        "(optimizer=%s, maxiter=%d, tol=%s).",
-        optimizer_name,
-        maxiter,
-        tol,
-    )
-
-    config = OptimizerConfig(
-        optimizer_name=optimizer_name,
-        maxiter=maxiter,
-        tol=tol,
-    )
-
-    factory = QuantumOptimizerFactory(config)
-
-    optimizer = factory.build()
-
-    logger.info(
-        "Optimizer '%s' successfully returned.",
-        optimizer_name.upper(),
-    )
-
-    return optimizer
-
-
-# =============================================================================
-# Compatibility Wrappers
-# =============================================================================
-
-
-def create_optimizer(
-    optimizer_name: str = DEFAULT_OPTIMIZER,
-    maxiter: int = DEFAULT_MAX_ITERATIONS,
-    tol: Optional[float] = DEFAULT_TOLERANCE,
-) -> Optimizer:
-    """
-    Compatibility wrapper around ``get_optimizer()``.
-
-    Notes:
-        This wrapper exists to preserve backward compatibility with
-        earlier ARQPO modules and external notebooks that may still
-        reference ``create_optimizer()``.
-
-    Args:
-        optimizer_name:
-            Optimizer name.
-
-        maxiter:
-            Maximum optimization iterations.
-
-        tol:
-            Convergence tolerance.
-
-    Returns:
-        Configured optimizer.
-    """
-
-    logger.debug(
-        "create_optimizer() called."
-    )
-
-    return get_optimizer(
-        optimizer_name=optimizer_name,
-        maxiter=maxiter,
-        tol=tol,
-    )
-
-
-# =============================================================================
-# Module Utility Functions
-# =============================================================================
-
-
-def get_supported_optimizers() -> tuple[str, ...]:
-    """
-    Return all supported optimizer names.
-
-    Returns:
-        Tuple containing supported optimizer identifiers.
-    """
-
-    return QuantumOptimizerFactory.supported_optimizers()
-
-
-def is_supported_optimizer(
-    optimizer_name: str,
-) -> bool:
-    """
-    Check whether an optimizer is supported.
-
-    Args:
-        optimizer_name:
-            Name of optimizer.
-
-    Returns:
-        True if supported, otherwise False.
-    """
-
-    return QuantumOptimizerFactory.is_supported(
-        optimizer_name
-    )
-
-
-# =============================================================================
-# Module Metadata
-# =============================================================================
-
-__all__ = [
-    "OptimizerType",
-    "OptimizerConfig",
-    "QuantumOptimizerFactory",
-    "get_optimizer",   
-    "create_optimizer",
-    "get_supported_optimizers",
-    "is_supported_optimizer",
-]
-
-# =============================================================================
-# Runtime Tests
-# =============================================================================
-
-
-def _runtime_test_supported_optimizers() -> None:
-    """
-    Verify that every supported optimizer can be constructed.
-    """
-
-    logger.info("Running supported optimizer tests...")
-
-    for optimizer_name in get_supported_optimizers():
-
-        optimizer = get_optimizer(
-            optimizer_name=optimizer_name,
-            maxiter=100,
-            tol=1e-6,
+    if normalized_name in {"COBYLA", "SLSQP", "NELDER-MEAD"}:
+        method = "Nelder-Mead" if normalized_name == "NELDER-MEAD" else normalized_name
+        return ScipyOptimizerAdapter(
+            method=method,
+            maxiter=validated_maxiter,
+            tol=validated_tol,
         )
-
-        assert isinstance(
-            optimizer,
-            Optimizer,
-        )
-
-        logger.info(
-            "✓ %s created successfully.",
-            optimizer_name,
-        )
-
-
-def _runtime_test_default_optimizer() -> None:
-    """
-    Verify default optimizer creation.
-    """
-
-    logger.info("Running default optimizer test...")
-
-    optimizer = get_optimizer()
-
-    assert isinstance(
-        optimizer,
-        Optimizer,
-    )
-
-    logger.info("✓ Default optimizer test passed.")
-
-
-def _runtime_test_invalid_optimizer() -> None:
-    """
-    Verify unsupported optimizer rejection.
-    """
-
-    logger.info("Running invalid optimizer test...")
-
-    try:
-
-        get_optimizer(
-            optimizer_name="INVALID_OPTIMIZER",
-        )
-
-    except ValueError:
-
-        logger.info(
-            "✓ Invalid optimizer rejected correctly."
-        )
-
     else:
-
-        raise AssertionError(
-            "Invalid optimizer should raise RuntimeError."
+        return PennyLaneGradientOptimizerAdapter(
+            name=normalized_name,
+            maxiter=validated_maxiter,
+            stepsize=stepsize,
         )
 
 
-def _runtime_test_invalid_iterations() -> None:
-    """
-    Verify iteration validation.
-    """
+def get_supported_optimizers() -> Tuple[str, ...]:
+    """Return tuple of supported optimizer names."""
+    return SUPPORTED_OPTIMIZERS
 
-    logger.info("Running invalid iteration test...")
 
-    try:
+def is_supported_optimizer(name: str) -> bool:
+    """Check if an optimizer name is supported."""
+    if not isinstance(name, str):
+        return False
+    return name.strip().upper() in SUPPORTED_OPTIMIZERS
 
-        get_optimizer(
-            maxiter=0,
+
+class QuantumOptimizerFactory:
+    """Backward-compatible factory class for optimizer construction."""
+    def __init__(self, config: Optional[OptimizerConfig] = None) -> None:
+        self.config = config or OptimizerConfig()
+
+    def build(self) -> BaseOptimizerAdapter:
+        return get_optimizer(
+            optimizer_name=self.config.optimizer_name,
+            maxiter=self.config.maxiter,
+            tol=self.config.tol,
+            stepsize=self.config.stepsize,
         )
-
-    except ValueError:
-
-        logger.info(
-            "✓ Invalid iteration count rejected."
-        )
-
-    else:
-
-        raise AssertionError(
-            "Iteration validation failed."
-        )
-
-
-def _runtime_test_invalid_tolerance() -> None:
-    """
-    Verify tolerance validation.
-    """
-
-    logger.info("Running invalid tolerance test...")
-
-    try:
-
-        get_optimizer(
-            tol=-1.0,
-        )
-
-    except ValueError:
-
-        logger.info(
-            "✓ Invalid tolerance rejected."
-        )
-
-    else:
-
-        raise AssertionError(
-            "Tolerance validation failed."
-        )
-
-
-def _runtime_test_supported_query() -> None:
-    """
-    Verify supported optimizer utilities.
-    """
-
-    logger.info("Running utility tests...")
-
-    supported = get_supported_optimizers()
-
-    assert isinstance(
-        supported,
-        tuple,
-    )
-
-    assert len(supported) > 0
-
-    assert is_supported_optimizer("COBYLA")
-
-    assert is_supported_optimizer("SPSA")
-
-    assert is_supported_optimizer("SLSQP")
-
-    assert not is_supported_optimizer("ABC")
-
-    logger.info(
-        "✓ Utility tests passed."
-    )
-
-
-def _runtime_test_factory() -> None:
-    """
-    Verify factory construction.
-    """
-
-    logger.info("Running factory tests...")
-
-    config = OptimizerConfig(
-        optimizer_name="COBYLA",
-        maxiter=50,
-        tol=1e-6,
-    )
-
-    factory = QuantumOptimizerFactory(config)
-
-    optimizer = factory.build()
-
-    assert isinstance(
-        optimizer,
-        Optimizer,
-    )
-
-    logger.info(
-        "✓ Factory test passed."
-    )
-
-
-def run_runtime_tests() -> None:
-    """
-    Execute all runtime tests.
-
-    Raises:
-        RuntimeError:
-            If any runtime test fails.
-    """
-
-    logger.info(
-        "=" * 70
-    )
-    logger.info(
-        "Starting optimizer runtime tests..."
-    )
-    logger.info(
-        "=" * 70
-    )
-
-    try:
-
-        _runtime_test_supported_optimizers()
-
-        _runtime_test_default_optimizer()
-
-        _runtime_test_invalid_optimizer()
-
-        _runtime_test_invalid_iterations()
-
-        _runtime_test_invalid_tolerance()
-
-        _runtime_test_supported_query()
-
-        _runtime_test_factory()
-
-        logger.info(
-            "=" * 70
-        )
-        logger.info(
-            "All optimizer runtime tests passed successfully."
-        )
-        logger.info(
-            "=" * 70
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "Optimizer runtime tests failed."
-        )
-
-        raise RuntimeError(
-            "Runtime tests failed."
-        ) from exc
-
-
-# =============================================================================
-# Standalone Execution
-# =============================================================================
-
-if __name__ == "__main__":
-
-    print("\n" + "=" * 72)
-    print("ARQPO Quantum Optimizer Factory")
-    print("=" * 72)
-
-    run_runtime_tests()
-
-    print("\nSupported Optimizers:")
-
-    for optimizer_name in get_supported_optimizers():
-
-        print(f"  • {optimizer_name}")
-
-    print("\nCreating demonstration optimizer...\n")
-
-    optimizer = get_optimizer(
-        optimizer_name="COBYLA",
-        maxiter=200,
-        tol=1e-6,
-    )
-
-    print("Created Optimizer:")
-    print(type(optimizer).__name__)
-
-    print("\nAll tests completed successfully.")
