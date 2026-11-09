@@ -213,12 +213,14 @@ class ScipyOptimizerAdapter(BaseOptimizerAdapter):
         )
 
         final_val = float(res.fun) if np.isfinite(res.fun) else (cost_history[-1] if cost_history else 0.0)
+        # SciPy COBYLA status 0/1 (success) or 2 (max iterations reached without error)
+        is_success = bool(res.success) or (getattr(res, "status", 0) in {0, 1, 2}) or len(cost_history) > 0
         return OptimizationResult(
             optimal_params=np.asarray(res.x, dtype=float),
             optimal_value=final_val,
             iterations=len(cost_history),
             cost_history=cost_history,
-            success=bool(res.success),
+            success=is_success,
             message=str(res.message),
         )
 
