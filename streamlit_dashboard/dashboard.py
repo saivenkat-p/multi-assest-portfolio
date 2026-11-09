@@ -178,7 +178,7 @@ def initialize_session_state(prices: pd.DataFrame, metadata: pd.DataFrame) -> No
     if "gamma" not in st.session_state:
         st.session_state["gamma"] = 1.0
     if "quantum_backend" not in st.session_state:
-        st.session_state["quantum_backend"] = "aer_simulator"
+        st.session_state["quantum_backend"] = "default.qubit"
     if "n_qubits" not in st.session_state:
         st.session_state["n_qubits"] = 5
     if "current_regime" not in st.session_state:
@@ -239,9 +239,9 @@ def render_sidebar() -> str:
     # Quantum Backend Selector
     backend = st.sidebar.selectbox(
         "Quantum Execution Engine",
-        options=["aer_simulator", "fake_santiago", "fake_jakarta", "statevector_simulator"],
+        options=["default.qubit", "lightning.qubit"],
         index=0,
-        help="Select Qiskit Aer simulator or noisy quantum hardware emulator.",
+        help="Select PennyLane execution device (default.qubit statevector or lightning.qubit).",
     )
     st.session_state["quantum_backend"] = backend
 
@@ -262,7 +262,7 @@ def render_sidebar() -> str:
     st.sidebar.info(
         "**WISER × Vanguard Challenge 2026**\n\n"
         "Status: 🟢 Backend Modules 01–08 Active\n\n"
-        "Architecture: QAOA & VQE Hybrid Solver"
+        "Architecture: PennyLane QAOA & VQE Hybrid Solver"
     )
 
     return selected_page

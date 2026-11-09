@@ -35,9 +35,10 @@ def run_quantum_optimization(
     optimizer_name: str,
     p_layers: int,
     max_iter: int,
+    backend_device: str = "default.qubit",
 ) -> Dict[str, object]:
     """
-    Executes backend quantum solver (QAOA/VQE) or fallback hybrid solver.
+    Executes native PennyLane quantum solver (QAOA/VQE) with graceful classical fallback.
 
     Returns:
         Dict[str, object]: Results dictionary containing weights, return, risk, sharpe, trace.
@@ -47,61 +48,79 @@ def run_quantum_optimization(
     mean_ret = returns.mean() * 252
     cov_mat = returns.cov() * 252
 
-    # Attempt importing backend QAOA/VQE modules
     try:
-        import importlib
-        qaoa_mod = importlib.import_module("04_quantum_algorithms.qaoa_solver")
-        vqe_mod = importlib.import_module("04_quantum_algorithms.vqe_solver")
-        hamiltonian_mod = importlib.import_module("03_optimization.hamiltonian_builder")
-    except Exception as err:
-        logger.warning(f"Backend quantum solver note: {err}. Running fast analytical hybrid solver.")
+        from optimization.hamiltonian_builder import HamiltonianBuilder
+        builder = HamiltonianBuilder(risk_aversion=gamma, penalty_factor=50.0, binary_bits=1)
+        Q, offset = builder.build_qubo(mean_ret.values, cov_mat.values)
 
-    # Formulate QUBO interaction matrix Q = gamma * cov - diag(mean_ret)
-    Q = gamma * cov_mat.values - np.diag(mean_ret.values)
-    
-    # Simulate variational convergence trace
-    step_energies = []
-    e_curr = np.trace(Q) * 0.5
-    for i in range(max_iter):
-        e_curr -= (e_curr - (-np.max(mean_ret))) * 0.05 + np.random.normal(0, 0.002)
-        step_energies.append(e_curr)
+        if algorithm.upper() == "VQE":
+            from quantum_algorithms.vqe_solver import VQEPortfolioSolver
+            solver = VQEPortfolioSolver(
+                device_name=backend_device,
+                reps=p_layers,
+                optimizer_name=optimizer_name,
+                optimizer_iter=max_iter,
+                seed=42,
+            )
+            weights, metadata = solver.solve(Q, n_assets=n_qubits, binary_bits=1, offset=offset)
+        else:
+            from quantum_algorithms.qaoa_solver import QAOAPortfolioSolver
+            solver = QAOAPortfolioSolver(
+                device_name=backend_device,
+                reps=p_layers,
+                optimizer_name=optimizer_name,
+                optimizer_iter=max_iter,
+                seed=42,
+            )
+            weights, metadata = solver.solve(Q, n_assets=n_qubits, binary_bits=1, offset=offset)
 
-    # Decode bitstring / weights
-    raw_weights = np.maximum(0, mean_ret.values / (gamma * np.diag(cov_mat.values) + 1e-5))
-    if raw_weights.sum() > 0:
-        weights = raw_weights / raw_weights.sum()
-    else:
-        weights = np.ones(n_qubits) / n_qubits
+        port_ret = float(np.sum(weights * mean_ret.values))
+        port_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov_mat.values, weights))))
+        sharpe = float((port_ret - 0.02) / port_vol) if port_vol > 0 else 0.0
 
-    port_ret = float(np.sum(weights * mean_ret.values))
-    port_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov_mat.values, weights))))
-    sharpe = float((port_ret - 0.02) / port_vol) if port_vol > 0 else 0.0
+        return {
+            "assets": assets,
+            "weights": pd.Series(weights, index=assets),
+            "expected_return": port_ret,
+            "volatility": port_vol,
+            "sharpe_ratio": sharpe,
+            "feasible": bool(np.isclose(np.sum(weights), 1.0, atol=1e-3)),
+            "qubo_matrix": pd.DataFrame(Q, index=assets, columns=assets),
+            "convergence_trace": metadata.get("convergence_trace", []),
+            "bitstrings": metadata.get("top_bitstrings", {}),
+            "algorithm_used": f"PennyLane {algorithm} ({p_layers} layers, {optimizer_name})",
+            "metadata": metadata,
+        }
 
-    # Top bitstrings sample simulation
-    bitstrings = {}
-    optimal_idx = np.argmax(weights)
-    for b in range(min(2**n_qubits, 16)):
-        bs = format(b, f"0{n_qubits}b")
-        bitstrings[bs] = np.random.exponential(1.0)
-    
-    # Ensure ground state has highest probability
-    best_bs = "".join(["1" if w > (1.0 / n_qubits) else "0" for w in weights])
-    bitstrings[best_bs] = 25.0
-    total_shots = sum(bitstrings.values())
-    bitstrings = {k: v / total_shots for k, v in bitstrings.items()}
+    except Exception as exc:
+        logger.warning(
+            "PennyLane solver execution note: %s. Running analytical hybrid fallback.",
+            exc,
+        )
+        # Formulate QUBO interaction matrix Q = gamma * cov - diag(mean_ret)
+        Q = gamma * cov_mat.values - np.diag(mean_ret.values)
+        raw_weights = np.maximum(0, mean_ret.values / (gamma * np.diag(cov_mat.values) + 1e-5))
+        if raw_weights.sum() > 0:
+            weights = raw_weights / raw_weights.sum()
+        else:
+            weights = np.ones(n_qubits) / n_qubits
 
-    return {
-        "assets": assets,
-        "weights": pd.Series(weights, index=assets),
-        "expected_return": port_ret,
-        "volatility": port_vol,
-        "sharpe_ratio": sharpe,
-        "feasible": True,
-        "qubo_matrix": pd.DataFrame(Q, index=assets, columns=assets),
-        "convergence_trace": step_energies,
-        "bitstrings": bitstrings,
-        "algorithm_used": f"{algorithm} ({p_layers} layers, {optimizer_name})",
-    }
+        port_ret = float(np.sum(weights * mean_ret.values))
+        port_vol = float(np.sqrt(np.dot(weights.T, np.dot(cov_mat.values, weights))))
+        sharpe = float((port_ret - 0.02) / port_vol) if port_vol > 0 else 0.0
+
+        return {
+            "assets": assets,
+            "weights": pd.Series(weights, index=assets),
+            "expected_return": port_ret,
+            "volatility": port_vol,
+            "sharpe_ratio": sharpe,
+            "feasible": True,
+            "qubo_matrix": pd.DataFrame(Q, index=assets, columns=assets),
+            "convergence_trace": [float(np.trace(Q) * 0.5 * (1.0 - 0.02 * i)) for i in range(max_iter)],
+            "bitstrings": {"".join(["1" if w > (1.0 / n_qubits) else "0" for w in weights]): 1.0},
+            "algorithm_used": f"Analytical Fallback ({algorithm})",
+        }
 
 
 def render_weights_donut(weights: pd.Series) -> go.Figure:
@@ -186,7 +205,7 @@ def render() -> None:
     gamma = st.session_state.get("gamma", 1.0)
     n_qubits = st.session_state.get("n_qubits", 5)
     regime = st.session_state.get("current_regime", "Bull")
-    backend = st.session_state.get("quantum_backend", "aer_simulator")
+    backend = st.session_state.get("quantum_backend", "default.qubit")
 
     if prices.empty:
         st.error("⚠️ Historical price data unavailable. Please verify data files.")
