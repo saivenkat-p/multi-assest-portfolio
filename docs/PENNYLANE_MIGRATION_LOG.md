@@ -61,3 +61,44 @@
   - Implemented raw discrete weight mapping $w_i = V_i / (2^B - 1)$ and simplex normalization $\sum w_i = 1$.
   - Added uniform $1/N$ fallback for all-zero measurement bitstrings.
   - Added unit test suite in `tests/test_decoding.py`.
+
+- **Commit 9:** `feat: implement parameterized PennyLane QAOA circuit and solver`
+  - Replaced legacy Qiskit QAOA wrapper with native PennyLane implementation in `quantum_algorithms/qaoa_solver.py`.
+  - Constructed phase-separator cost layer via $R_Z(2 \gamma h_i)$ and $\text{IsingZZ}(2 \gamma J_{ij})$ and transverse-field mixer via $R_X(2 \beta)$.
+  - Integrated QNodes for analytic cost expectation and computational basis state probability measurement.
+  - Added unit and regression tests in `tests/test_qaoa.py`.
+
+- **Commit 10:** `feat: implement PennyLane hardware-efficient variational ansatz`
+  - Migrated `quantum_algorithms/ansatz.py` to PennyLane.
+  - Implemented alternating parameterized $R_Y, R_Z$ rotation layers and CNOT entanglement layers (linear, circular, full topologies).
+  - Added parameter counting and initialization helpers.
+  - Added unit test suite in `tests/test_ansatz.py`.
+
+- **Commit 11:** `feat: integrate PennyLane VQE solver for portfolio optimization`
+  - Replaced legacy Qiskit VQE with native PennyLane implementation in `quantum_algorithms/vqe_solver.py`.
+  - Connected parameterized HEA ansatz and Ising Hamiltonian to PennyLane QNodes.
+  - Verified variational bound and ground state recovery against exact numerical diagonalization.
+  - Added unit test suite in `tests/test_vqe.py`.
+
+- **Commit 12:** `refactor: migrate quantum circuit visualizer to PennyLane`
+  - Replaced Qiskit visualization APIs in `quantum_algorithms/circuit_visualizer.py` with PennyLane `qml.draw` and `qml.draw_mpl`.
+  - Implemented circuit complexity statistics extractor (depth, gate count, operation counts, width).
+  - Added unit test suite in `tests/test_circuit_visualizer.py`.
+
+- **Commit 13:** `feat: integrate PennyLane solvers with Streamlit dashboard`
+  - Resolved legacy import path issues in `streamlit_dashboard/portfolio_view.py`.
+  - Connected native PennyLane QAOA and VQE solvers directly to interactive dashboard UI.
+  - Updated backend selectors and execution engine descriptions in `streamlit_dashboard/dashboard.py` and `streamlit_dashboard/copilot.py` to cite `default.qubit` and `lightning.qubit`.
+
+- **Commit 14:** `test: add end-to-end quantum financial integration tests`
+  - Created `tests/test_integration.py` covering the complete data-to-portfolio pipeline: returns $\to$ covariance $\to$ QUBO $\to$ PennyLane QAOA/VQE $\to$ decoding $\to$ portfolio Sharpe evaluation.
+
+- **Commit 15:** `build: modernize requirements and eliminate legacy Qiskit dependencies`
+  - Converted `requirements.txt` from UTF-16 to standard UTF-8.
+  - Removed deprecated `qiskit` and `qiskit-algorithms` packages.
+  - Added modern `pennylane` and `pennylane-lightning` dependencies.
+
+- **Commit 16:** `docs: document PennyLane mathematical model, architecture, and final audit`
+  - Authored comprehensive mathematical formulation in `docs/mathematical_model.md`.
+  - Updated enterprise README in `README.md`.
+  - Completed and signed off `docs/PENNYLANE_FINAL_AUDIT.md`.
